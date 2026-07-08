@@ -8,7 +8,7 @@ const defs = parseGateDefs(gatesXml);
 const PALETTE: Array<{ name: string; label: string }> = [
   { name: 'AA_TOGGLE', label: 'Toggle (IN)' },
   { name: 'GA_LED', label: 'LED (OUT)' },
-  { name: 'AA_INVERTER', label: 'Inverter' },
+  { name: 'AA_INVERTER', label: 'NOT' },
   { name: 'AA_AND2', label: '2-input AND' },
   { name: 'AA_AND3', label: '3-input AND' },
   { name: 'AA_AND4', label: '4-input AND' },
