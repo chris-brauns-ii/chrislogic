@@ -1,0 +1,57 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #app { height: 100%; }
+
+#app {
+  display: flex;
+  flex-direction: column;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: #222;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 8px 12px;
+  background: #2b3a4a;
+  color: #fff;
+}
+
+header .brand { font-weight: 700; letter-spacing: 0.5px; }
+
+#hint { color: #b8c6d4; font-size: 12px; }
+
+#body { display: flex; flex: 1; min-height: 0; }
+
+#palette {
+  width: 132px;
+  overflow-y: auto;
+  background: #f2f4f6;
+  border-right: 1px solid #d5dade;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.palette-item {
+  background: #fff;
+  border: 1px solid #d5dade;
+  border-radius: 4px;
+  padding: 4px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.palette-item:hover { border-color: #7a99b8; }
+
+.palette-item.active { border-color: #d33; background: #fff5f5; }
+
+.palette-item .label { font-size: 11px; color: #444; margin-top: 2px; }
+
+#canvas-wrap { flex: 1; position: relative; min-width: 0; }
+
+#canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
