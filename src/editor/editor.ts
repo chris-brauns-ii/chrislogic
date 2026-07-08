@@ -18,7 +18,6 @@ import {
   autoRoute,
   dragSegTo,
   junctionPoints,
-  movePin,
   segDistance,
   segEnds,
   unionGeoms,
@@ -255,22 +254,12 @@ export class Editor {
     this.circuit.setDriver(gate.id, gate.toggleState);
   }
 
-  // Keep wire geometry glued to a gate's pins while it moves.
-  private glueWires(gate: PlacedGate, oldX: number, oldY: number): void {
+  // Moving a gate resets its wires to a fresh auto-route (the original's
+  // behavior). Incrementally gluing segments accumulates jog stubs on every
+  // snapped step of the drag and degenerates into staircases.
+  private glueWires(gate: PlacedGate): void {
     for (const wire of this.wires) {
-      for (const conn of wire.conns) {
-        if (conn.gateId !== gate.id) continue;
-        const hs = findHotspot(gate, conn.pin)!;
-        const geom = this.geomOf(wire);
-        const ok = movePin(
-          geom,
-          conn,
-          { x: oldX + hs.x, y: oldY + hs.y },
-          { x: gate.x + hs.x, y: gate.y + hs.y },
-          (c) => this.pinPos(c),
-        );
-        if (!ok) wire.geom = null; // inconsistent geometry: fall back to re-route
-      }
+      if (wire.conns.some((c) => c.gateId === gate.id)) wire.geom = null;
     }
   }
 
@@ -421,12 +410,10 @@ export class Editor {
         const nx = snap(p.x - mode.grabDx);
         const ny = snap(p.y - mode.grabDy);
         if (nx !== gate.x || ny !== gate.y) {
-          const ox = gate.x;
-          const oy = gate.y;
           gate.x = nx;
           gate.y = ny;
           mode.moved = true;
-          this.glueWires(gate, ox, oy);
+          this.glueWires(gate);
         }
       }
     }

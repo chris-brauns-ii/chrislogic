@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { autoRoute, dragSegTo, movePin, pointOnSeg, type PinAt, type WireGeom } from './wiregeom.ts';
+import { autoRoute, dragSegTo, pointOnSeg, type PinAt, type WireGeom } from './wiregeom.ts';
 import type { Point, WireConn } from './model.ts';
 
 // pins keyed by "gateId:pin"
@@ -74,30 +74,6 @@ test('drag a straight two-pin wire -> U shape with two stubs', () => {
   dragSegTo(g, g.segs[0]!.id, 2, at);
   assert.equal(g.segs.length, 3);
   assert.equal(g.segs.filter((s) => s.vertical).length, 2);
-  assertPinsOnSegs(g, at);
-});
-
-test('movePin along the segment axis stretches it', () => {
-  const map: Record<string, Point> = { '1:OUT': { x: 0, y: 0 }, '2:N_in0': { x: 6, y: 0 } };
-  const { conns, at } = pins(map);
-  const g = autoRoute(conns, at);
-  map['1:OUT'] = { x: -3, y: 0 };
-  movePin(g, conns[0]!, { x: 0, y: 0 }, { x: -3, y: 0 }, at);
-  assert.equal(g.segs.length, 1);
-  assert.equal(g.segs[0]!.lo, -3);
-  assertPinsOnSegs(g, at);
-});
-
-test('movePin off-axis spawns a jog and stays glued while dragging', () => {
-  const map: Record<string, Point> = { '1:OUT': { x: 0, y: 0 }, '2:N_in0': { x: 6, y: 0 } };
-  const { conns, at } = pins(map);
-  const g = autoRoute(conns, at);
-  // gate drags up in two steps, like a live mouse drag
-  map['1:OUT'] = { x: 0, y: 2 };
-  movePin(g, conns[0]!, { x: 0, y: 0 }, { x: 0, y: 2 }, at);
-  assertPinsOnSegs(g, at);
-  map['1:OUT'] = { x: 1, y: 3 };
-  movePin(g, conns[0]!, { x: 0, y: 2 }, { x: 1, y: 3 }, at);
   assertPinsOnSegs(g, at);
 });
 

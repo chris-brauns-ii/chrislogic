@@ -200,34 +200,6 @@ export function dragSegTo(g: WireGeom, segId: number, newPos: number, pinAt: Pin
   cleanup(g, pinAt, seg.id);
 }
 
-// A pin moved (its gate was dragged). Stretch the attached segment along its
-// axis; if the pin also moved off-axis, spawn a perpendicular jog stub.
-export function movePin(g: WireGeom, conn: WireConn, oldP: Point, newP: Point, pinAt: PinAt): boolean {
-  const a = g.attach.find((x) => x.gateId === conn.gateId && x.pin === conn.pin);
-  if (!a) return false;
-  const seg = g.segs.find((s) => s.id === a.segId);
-  if (!seg) return false;
-
-  const oldAlong = seg.vertical ? oldP.y : oldP.x;
-  const newAlong = seg.vertical ? newP.y : newP.x;
-  const newAcross = seg.vertical ? newP.x : newP.y;
-
-  if (eq(seg.lo, oldAlong)) seg.lo = newAlong;
-  else if (eq(seg.hi, oldAlong)) seg.hi = newAlong;
-  else {
-    seg.lo = Math.min(seg.lo, newAlong);
-    seg.hi = Math.max(seg.hi, newAlong);
-  }
-  normalize(seg);
-
-  if (!eq(newAcross, seg.pos)) {
-    const stub = addSeg(g, !seg.vertical, newAlong, newAcross, seg.pos);
-    a.segId = stub.id;
-  }
-  cleanup(g, pinAt);
-  return true;
-}
-
 // ---- cleanup ----
 
 export function cleanup(g: WireGeom, pinAt: PinAt, protectId?: number): void {
