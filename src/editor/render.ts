@@ -27,6 +27,10 @@ export function drawGateShape(
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
   }
+  for (const [cx, cy, r] of def.circles) {
+    ctx.moveTo(cx + r, cy);
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  }
   ctx.stroke();
   ctx.setLineDash([]);
 }

@@ -7,6 +7,7 @@ export interface Hotspot {
   x: number;
   y: number;
   isInput: boolean;
+  inverted: boolean; // NAND/NOR/XNOR/inverter pins carry <inverted>true</inverted>
 }
 
 export interface GateDef {
@@ -16,6 +17,7 @@ export interface GateDef {
   logicType: string;
   hotspots: Hotspot[];
   lines: Array<[number, number, number, number]>;
+  circles: Array<[cx: number, cy: number, r: number]>; // inversion bubbles
   guiParams: Record<string, string>;
   logicParams: Record<string, string>;
   bbox: { minX: number; minY: number; maxX: number; maxY: number };
@@ -37,15 +39,28 @@ export function parseGateDefs(text: string): Map<string, GateDef> {
     const block = m[1]!;
 
     const hotspots: Hotspot[] = [];
-    for (const io of block.matchAll(/<(input|output)>\s*<name>([\s\S]*?)<\/name>\s*<point>([\s\S]*?)<\/point>/g)) {
-      const [x, y] = io[3]!.split(',').map(Number);
-      hotspots.push({ name: io[2]!.trim(), x: x!, y: y!, isInput: io[1] === 'input' });
+    for (const io of block.matchAll(/<(input|output)>([\s\S]*?)<\/\1>/g)) {
+      const body = io[2]!;
+      const [x, y] = tag(body, 'point').split(',').map(Number);
+      hotspots.push({
+        name: tag(body, 'name'),
+        x: x!,
+        y: y!,
+        isInput: io[1] === 'input',
+        inverted: tag(body, 'inverted') === 'true',
+      });
     }
 
+    const shape = tag(block, 'shape');
     const lines: Array<[number, number, number, number]> = [];
-    for (const l of tag(block, 'shape').matchAll(/<line>([\s\S]*?)<\/line>/g)) {
+    for (const l of shape.matchAll(/<line>([\s\S]*?)<\/line>/g)) {
       const [x1, y1, x2, y2] = l[1]!.split(',').map(Number);
       lines.push([x1!, y1!, x2!, y2!]);
+    }
+    const circles: Array<[number, number, number]> = [];
+    for (const c of shape.matchAll(/<circle>([\s\S]*?)<\/circle>/g)) {
+      const [cx, cy, r] = c[1]!.split(',').map(Number); // 4th value (segment count) unused
+      circles.push([cx!, cy!, r!]);
     }
 
     const params = (kind: string): Record<string, string> => {
@@ -65,6 +80,12 @@ export function parseGateDefs(text: string): Map<string, GateDef> {
       bbox.maxX = Math.max(bbox.maxX, x1, x2);
       bbox.maxY = Math.max(bbox.maxY, y1, y2);
     }
+    for (const [cx, cy, r] of circles) {
+      bbox.minX = Math.min(bbox.minX, cx - r);
+      bbox.minY = Math.min(bbox.minY, cy - r);
+      bbox.maxX = Math.max(bbox.maxX, cx + r);
+      bbox.maxY = Math.max(bbox.maxY, cy + r);
+    }
 
     const def: GateDef = {
       name: tag(block, 'name'),
@@ -73,6 +94,7 @@ export function parseGateDefs(text: string): Map<string, GateDef> {
       logicType: tag(block, 'logic_type'),
       hotspots,
       lines,
+      circles,
       guiParams: params('gui'),
       logicParams: params('logic'),
       bbox,

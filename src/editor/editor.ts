@@ -18,11 +18,23 @@ import { drawGateFill, drawGateShape, innerBox, stateColor } from './render.ts';
 type Mode =
   | { kind: 'idle' }
   | { kind: 'placing'; def: GateDef }
+  | { kind: 'paletteDrag'; def: GateDef; startX: number; startY: number }
   | { kind: 'pan'; startX: number; startY: number; startOx: number; startOy: number }
-  | { kind: 'dragGate'; gateId: number; grabDx: number; grabDy: number; moved: boolean }
+  | { kind: 'dragGate'; gateId: number; grabDx: number; grabDy: number; moved: boolean; preMove: Snapshot }
   | { kind: 'wiring'; from: WireConn };
 
 type Selection = { kind: 'gate' | 'wire'; id: number } | null;
+
+// Undo/redo works on whole-topology snapshots: the editor already rebuilds
+// the sim from scratch on every change, so restoring a snapshot is exactly
+// one rebuild. GateDefs are shared immutable data and are not cloned.
+interface Snapshot {
+  gates: PlacedGate[];
+  wires: Wire[];
+  nextId: number;
+}
+
+const MAX_UNDO = 200;
 
 const HOTSPOT_RADIUS = 0.45;
 const WIRE_HIT_RADIUS = 0.3;
@@ -37,8 +49,11 @@ export class Editor {
   private mode: Mode = { kind: 'idle' };
   private selection: Selection = null;
   private mouse: Point = { x: 0, y: 0 };
+  private overCanvas = false;
   private hoverHotspot: WireConn | null = null;
   private spaceDown = false;
+  private undoStack: Snapshot[] = [];
+  private redoStack: Snapshot[] = [];
 
   private ctx: CanvasRenderingContext2D;
 
@@ -66,6 +81,69 @@ export class Editor {
     this.setHint();
   }
 
+  // Mousedown on a palette item: drag onto the canvas to drop a gate
+  // (CedarLogic's DRAG_NEWGATE). A plain click falls back to placing mode.
+  beginPaletteDrag(def: GateDef, e: MouseEvent): void {
+    this.selection = null;
+    this.mode = { kind: 'paletteDrag', def, startX: e.clientX, startY: e.clientY };
+    this.onModeChange(def);
+    this.setHint();
+  }
+
+  // ---- programmatic construction (demo circuits, future file load) ----
+
+  place(def: GateDef, x: number, y: number): number {
+    const id = this.nextId++;
+    this.gates.push({ id, def, x: snap(x), y: snap(y), toggleState: State.ZERO });
+    return id;
+  }
+
+  wire(conns: Array<[gateId: number, pin: string]>): void {
+    this.wires.push({ id: this.nextId++, conns: conns.map(([gateId, pin]) => ({ gateId, pin })) });
+  }
+
+  refresh(): void {
+    this.rebuild();
+  }
+
+  // ---- undo/redo ----
+
+  private snapshot(): Snapshot {
+    return {
+      gates: this.gates.map((g) => ({ ...g })),
+      wires: this.wires.map((w) => ({ id: w.id, conns: w.conns.map((c) => ({ ...c })) })),
+      nextId: this.nextId,
+    };
+  }
+
+  private restore(s: Snapshot): void {
+    this.gates = s.gates.map((g) => ({ ...g }));
+    this.wires = s.wires.map((w) => ({ id: w.id, conns: w.conns.map((c) => ({ ...c })) }));
+    this.nextId = s.nextId;
+    this.selection = null;
+    this.rebuild();
+  }
+
+  private checkpoint(pre: Snapshot = this.snapshot()): void {
+    this.undoStack.push(pre);
+    if (this.undoStack.length > MAX_UNDO) this.undoStack.shift();
+    this.redoStack.length = 0;
+  }
+
+  undo(): void {
+    const prev = this.undoStack.pop();
+    if (!prev) return;
+    this.redoStack.push(this.snapshot());
+    this.restore(prev);
+  }
+
+  redo(): void {
+    const next = this.redoStack.pop();
+    if (!next) return;
+    this.undoStack.push(this.snapshot());
+    this.restore(next);
+  }
+
   // ---- topology -> simulation ----
 
   // The editor is the source of truth; rebuild the circuit from scratch on
@@ -73,8 +151,9 @@ export class Editor {
   private rebuild(): void {
     this.circuit = new Circuit();
     for (const gate of this.gates) {
-      const inputs = gate.def.hotspots.filter((h) => h.isInput).map((h) => h.name);
-      const outputs = gate.def.hotspots.filter((h) => !h.isInput).map((h) => h.name);
+      const pin = (h: { name: string; inverted: boolean }) => ({ name: h.name, inverted: h.inverted });
+      const inputs = gate.def.hotspots.filter((h) => h.isInput).map(pin);
+      const outputs = gate.def.hotspots.filter((h) => !h.isInput).map(pin);
       this.circuit.addGate(gate.id, gate.def.logicType as LogicType, inputs, outputs);
     }
     for (const wire of this.wires) {
@@ -97,6 +176,8 @@ export class Editor {
       this.wires.find((w) => w.conns.some((x) => x.gateId === c.gateId && x.pin === c.pin));
     const wa = wireOf(a);
     const wb = wireOf(b);
+    if (wa && wa === wb) return; // already on the same net
+    this.checkpoint();
     if (!wa && !wb) {
       this.wires.push({ id: this.nextId++, conns: [a, b] });
     } else if (wa && !wb) {
@@ -112,6 +193,7 @@ export class Editor {
 
   private deleteSelection(): void {
     if (!this.selection) return;
+    this.checkpoint();
     if (this.selection.kind === 'gate') {
       const id = this.selection.id;
       this.gates = this.gates.filter((g) => g.id !== id);
@@ -206,6 +288,7 @@ export class Editor {
     if (e.button !== 0) return;
 
     if (this.mode.kind === 'placing') {
+      this.checkpoint();
       this.gates.push({
         id: this.nextId++,
         def: this.mode.def,
@@ -227,7 +310,14 @@ export class Editor {
     const gate = this.gateAt(p);
     if (gate) {
       this.selection = { kind: 'gate', id: gate.id };
-      this.mode = { kind: 'dragGate', gateId: gate.id, grabDx: p.x - gate.x, grabDy: p.y - gate.y, moved: false };
+      this.mode = {
+        kind: 'dragGate',
+        gateId: gate.id,
+        grabDx: p.x - gate.x,
+        grabDy: p.y - gate.y,
+        moved: false,
+        preMove: this.snapshot(),
+      };
       return;
     }
 
@@ -244,6 +334,9 @@ export class Editor {
   private onMouseMove(e: MouseEvent): void {
     const p = this.toWorld(e);
     this.mouse = p;
+    const rect = this.canvas.getBoundingClientRect();
+    this.overCanvas =
+      e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
 
     if (this.mode.kind === 'pan') {
       this.view.ox = this.mode.startOx + (e.clientX - this.mode.startX);
@@ -271,6 +364,25 @@ export class Editor {
   private onMouseUp(e: MouseEvent): void {
     const p = this.toWorld(e);
 
+    if (this.mode.kind === 'paletteDrag') {
+      const mode = this.mode;
+      const moved = Math.hypot(e.clientX - mode.startX, e.clientY - mode.startY) > 4;
+      if (this.overCanvas) {
+        this.checkpoint();
+        this.gates.push({ id: this.nextId++, def: mode.def, x: snap(p.x), y: snap(p.y), toggleState: State.ZERO });
+        this.rebuild();
+        this.mode = { kind: 'idle' };
+        this.onModeChange(null);
+      } else if (!moved) {
+        this.mode = { kind: 'placing', def: mode.def }; // plain click: place-on-click mode
+      } else {
+        this.mode = { kind: 'idle' };
+        this.onModeChange(null);
+      }
+      this.setHint();
+      return;
+    }
+
     if (this.mode.kind === 'wiring') {
       const target = this.hotspotAt(p);
       if (target) this.connectWire(this.mode.from, target);
@@ -282,6 +394,9 @@ export class Editor {
     if (this.mode.kind === 'dragGate') {
       const mode = this.mode;
       this.mode = { kind: 'idle' };
+      if (mode.moved) {
+        this.checkpoint(mode.preMove); // undo returns the gate to where the drag began
+      }
       if (!mode.moved) {
         const gate = this.gates.find((g) => g.id === mode.gateId);
         if (gate && gate.def.guiType === 'TOGGLE') {
@@ -315,6 +430,16 @@ export class Editor {
       this.spaceDown = true;
       return;
     }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      e.shiftKey ? this.redo() : this.undo();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      this.redo();
+      return;
+    }
     if (e.key === 'Escape') {
       this.mode = { kind: 'idle' };
       this.selection = null;
@@ -341,9 +466,11 @@ export class Editor {
     this.hintEl.textContent =
       this.mode.kind === 'placing'
         ? 'Click to place · Esc or right-click to stop'
-        : this.mode.kind === 'wiring'
-          ? 'Release on a pin to connect · release elsewhere to cancel'
-          : 'Palette: click then place · drag pin-to-pin to wire · click a toggle to flip it · wheel zooms, drag empty space pans · Delete removes selection';
+        : this.mode.kind === 'paletteDrag'
+          ? 'Drop on the canvas to place'
+          : this.mode.kind === 'wiring'
+            ? 'Release on a pin to connect · release elsewhere to cancel'
+            : 'Drag gates from the palette · drag pin-to-pin to wire · click a toggle to flip it · wheel zooms, drag empty space pans · Delete removes selection';
   }
 
   // ---- rendering ----
@@ -380,7 +507,9 @@ export class Editor {
     for (const wire of this.wires) this.drawWire(wire);
     if (this.mode.kind === 'wiring') this.drawPendingWire(this.mode.from);
     for (const gate of this.gates) this.drawGate(gate);
-    if (this.mode.kind === 'placing') this.drawGhost(this.mode.def);
+    if (this.mode.kind === 'placing' || (this.mode.kind === 'paletteDrag' && this.overCanvas)) {
+      this.drawGhost(this.mode.def);
+    }
     this.drawHotspots();
   }
 

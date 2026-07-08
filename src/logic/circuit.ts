@@ -3,7 +3,20 @@
 // state from all drivers, state changes trigger re-evaluation of readers.
 import { State } from './values.ts';
 
-export type LogicType = 'AND' | 'DRIVER' | 'NODE';
+export type LogicType = 'AND' | 'OR' | 'XOR' | 'BUFFER' | 'DRIVER' | 'NODE';
+
+export interface PinSpec {
+  name: string;
+  inverted: boolean;
+}
+
+// Pin inversion (the bubble on NAND/NOR/XNOR/inverter pins) flips only
+// well-defined values; HI_Z/UNKNOWN/CONFLICT pass through.
+function invert(s: State): State {
+  if (s === State.ZERO) return State.ONE;
+  if (s === State.ONE) return State.ZERO;
+  return s;
+}
 
 const GATE_DELAY = 1;
 
@@ -33,12 +46,12 @@ class Net {
 class SimGate {
   id: number;
   type: LogicType;
-  inputPins: string[];
-  outputPins: string[];
+  inputPins: PinSpec[];
+  outputPins: PinSpec[];
   pins = new Map<string, number>(); // pin name -> net id
   drives = new Map<string, State>(); // applied drive per output pin
   driverValue: State = State.ZERO; // DRIVER gates only
-  constructor(id: number, type: LogicType, inputPins: string[], outputPins: string[]) {
+  constructor(id: number, type: LogicType, inputPins: PinSpec[], outputPins: PinSpec[]) {
     this.id = id;
     this.type = type;
     this.inputPins = inputPins;
@@ -53,7 +66,7 @@ export class Circuit {
   private queue: SimEvent[] = [];
   private seq = 0;
 
-  addGate(id: number, type: LogicType, inputPins: string[], outputPins: string[]): void {
+  addGate(id: number, type: LogicType, inputPins: PinSpec[], outputPins: PinSpec[]): void {
     this.gates.set(id, new SimGate(id, type, inputPins, outputPins));
   }
 
@@ -136,20 +149,57 @@ export class Circuit {
     return State.HI_Z;
   }
 
+  private readInput(gate: SimGate, pin: PinSpec): State {
+    const netId = gate.pins.get(pin.name);
+    const s = netId !== undefined ? this.nets.get(netId)!.state : State.HI_Z;
+    return pin.inverted ? invert(s) : s;
+  }
+
   private evaluate(gate: SimGate): void {
-    let desired: Array<[string, State]>;
+    let desired: Array<[PinSpec, State]>;
     switch (gate.type) {
       case 'AND': {
         let value: State = State.ONE;
         for (const pin of gate.inputPins) {
-          const netId = gate.pins.get(pin);
-          const s = netId !== undefined ? this.nets.get(netId)!.state : State.HI_Z;
+          const s = this.readInput(gate, pin);
           if (s === State.ZERO) {
             value = State.ZERO;
             break;
           }
           if (s !== State.ONE) value = State.UNKNOWN;
         }
+        desired = [[gate.outputPins[0]!, value]];
+        break;
+      }
+      case 'OR': {
+        let value: State = State.ZERO;
+        for (const pin of gate.inputPins) {
+          const s = this.readInput(gate, pin);
+          if (s === State.ONE) {
+            value = State.ONE;
+            break;
+          }
+          if (s !== State.ZERO) value = State.UNKNOWN;
+        }
+        desired = [[gate.outputPins[0]!, value]];
+        break;
+      }
+      case 'XOR': {
+        let value: State = State.ZERO;
+        for (const pin of gate.inputPins) {
+          const s = this.readInput(gate, pin);
+          if (s === State.ONE) value = value === State.ONE ? State.ZERO : State.ONE;
+          else if (s !== State.ZERO) {
+            value = State.UNKNOWN;
+            break;
+          }
+        }
+        desired = [[gate.outputPins[0]!, value]];
+        break;
+      }
+      case 'BUFFER': {
+        const s = this.readInput(gate, gate.inputPins[0]!);
+        const value = s === State.ZERO || s === State.ONE ? s : State.UNKNOWN;
         desired = [[gate.outputPins[0]!, value]];
         break;
       }
@@ -160,9 +210,10 @@ export class Circuit {
         desired = [];
         break;
     }
-    for (const [pin, value] of desired) {
-      if ((gate.drives.get(pin) ?? State.HI_Z) !== value) {
-        this.queue.push({ time: this.time + GATE_DELAY, seq: this.seq++, gateId: gate.id, pin, value });
+    for (const [pin, raw] of desired) {
+      const value = pin.inverted ? invert(raw) : raw;
+      if ((gate.drives.get(pin.name) ?? State.HI_Z) !== value) {
+        this.queue.push({ time: this.time + GATE_DELAY, seq: this.seq++, gateId: gate.id, pin: pin.name, value });
       }
     }
   }
