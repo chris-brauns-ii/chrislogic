@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/logic/circuit.test.ts",
+    "test": "node --test src/logic/circuit.test.ts src/editor/wiregeom.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {

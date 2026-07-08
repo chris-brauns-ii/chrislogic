@@ -27,9 +27,13 @@ export interface WireConn {
 }
 
 // One wire is one electrical net; it may fan out to many connections.
+// Geometry (the segment tree) lives in ./wiregeom.ts; null means "not built
+// yet — auto-route from pin positions on next use". Any operation that can't
+// update geometry incrementally may set it back to null.
 export interface Wire {
   id: number;
   conns: WireConn[];
+  geom: import('./wiregeom.ts').WireGeom | null;
 }
 
 export function snap(v: number): number {

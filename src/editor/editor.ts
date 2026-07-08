@@ -5,7 +5,6 @@ import {
   findHotspot,
   gateBodyHit,
   hotspotPos,
-  pointSegmentDistance,
   routeWire,
   snap,
   type PlacedGate,
@@ -14,6 +13,17 @@ import {
   type WireConn,
 } from './model.ts';
 import { drawGateFill, drawGateShape, innerBox, stateColor } from './render.ts';
+import {
+  addBranch,
+  autoRoute,
+  dragSegTo,
+  junctionPoints,
+  movePin,
+  segDistance,
+  segEnds,
+  unionGeoms,
+  type WireGeom,
+} from './wiregeom.ts';
 
 type Mode =
   | { kind: 'idle' }
@@ -21,6 +31,7 @@ type Mode =
   | { kind: 'paletteDrag'; def: GateDef; startX: number; startY: number }
   | { kind: 'pan'; startX: number; startY: number; startOx: number; startOy: number }
   | { kind: 'dragGate'; gateId: number; grabDx: number; grabDy: number; moved: boolean; preMove: Snapshot }
+  | { kind: 'dragSeg'; wireId: number; segId: number; vertical: boolean; moved: boolean; preMove: Snapshot }
   | { kind: 'wiring'; from: WireConn };
 
 type Selection = { kind: 'gate' | 'wire'; id: number } | null;
@@ -51,6 +62,7 @@ export class Editor {
   private mouse: Point = { x: 0, y: 0 };
   private overCanvas = false;
   private hoverHotspot: WireConn | null = null;
+  private hoverSeg: { wire: Wire; segId: number; vertical: boolean } | null = null;
   private spaceDown = false;
   private undoStack: Snapshot[] = [];
   private redoStack: Snapshot[] = [];
@@ -99,7 +111,17 @@ export class Editor {
   }
 
   wire(conns: Array<[gateId: number, pin: string]>): void {
-    this.wires.push({ id: this.nextId++, conns: conns.map(([gateId, pin]) => ({ gateId, pin })) });
+    this.wires.push({ id: this.nextId++, conns: conns.map(([gateId, pin]) => ({ gateId, pin })), geom: null });
+  }
+
+  private pinPos(c: WireConn): Point {
+    const gate = this.gates.find((g) => g.id === c.gateId)!;
+    return hotspotPos(gate, findHotspot(gate, c.pin)!);
+  }
+
+  private geomOf(w: Wire): WireGeom {
+    if (!w.geom) w.geom = autoRoute(w.conns, (c) => this.pinPos(c));
+    return w.geom;
   }
 
   refresh(): void {
@@ -108,17 +130,31 @@ export class Editor {
 
   // ---- undo/redo ----
 
+  private cloneWire(w: Wire): Wire {
+    return {
+      id: w.id,
+      conns: w.conns.map((c) => ({ ...c })),
+      geom: w.geom
+        ? {
+            segs: w.geom.segs.map((s) => ({ ...s })),
+            attach: w.geom.attach.map((a) => ({ ...a })),
+            nextSeg: w.geom.nextSeg,
+          }
+        : null,
+    };
+  }
+
   private snapshot(): Snapshot {
     return {
       gates: this.gates.map((g) => ({ ...g })),
-      wires: this.wires.map((w) => ({ id: w.id, conns: w.conns.map((c) => ({ ...c })) })),
+      wires: this.wires.map((w) => this.cloneWire(w)),
       nextId: this.nextId,
     };
   }
 
   private restore(s: Snapshot): void {
     this.gates = s.gates.map((g) => ({ ...g }));
-    this.wires = s.wires.map((w) => ({ id: w.id, conns: w.conns.map((c) => ({ ...c })) }));
+    this.wires = s.wires.map((w) => this.cloneWire(w));
     this.nextId = s.nextId;
     this.selection = null;
     this.rebuild();
@@ -178,13 +214,17 @@ export class Editor {
     const wb = wireOf(b);
     if (wa && wa === wb) return; // already on the same net
     this.checkpoint();
+    const pinAt = (c: WireConn) => this.pinPos(c);
     if (!wa && !wb) {
-      this.wires.push({ id: this.nextId++, conns: [a, b] });
+      this.wires.push({ id: this.nextId++, conns: [a, b], geom: null });
     } else if (wa && !wb) {
+      addBranch(this.geomOf(wa), b, pinAt);
       wa.conns.push(b);
     } else if (!wa && wb) {
+      addBranch(this.geomOf(wb), a, pinAt);
       wb.conns.push(a);
     } else if (wa && wb && wa !== wb) {
+      wa.geom = unionGeoms(this.geomOf(wa), this.geomOf(wb), this.pinPos(a), this.pinPos(b), pinAt);
       wa.conns.push(...wb.conns);
       this.wires = this.wires.filter((w) => w !== wb);
     }
@@ -198,7 +238,9 @@ export class Editor {
       const id = this.selection.id;
       this.gates = this.gates.filter((g) => g.id !== id);
       for (const wire of this.wires) {
+        const before = wire.conns.length;
         wire.conns = wire.conns.filter((c) => c.gateId !== id);
+        if (wire.conns.length !== before) wire.geom = null; // re-route survivors
       }
       this.wires = this.wires.filter((w) => w.conns.length >= 2);
     } else {
@@ -211,6 +253,25 @@ export class Editor {
   private flipToggle(gate: PlacedGate): void {
     gate.toggleState = gate.toggleState === State.ONE ? State.ZERO : State.ONE;
     this.circuit.setDriver(gate.id, gate.toggleState);
+  }
+
+  // Keep wire geometry glued to a gate's pins while it moves.
+  private glueWires(gate: PlacedGate, oldX: number, oldY: number): void {
+    for (const wire of this.wires) {
+      for (const conn of wire.conns) {
+        if (conn.gateId !== gate.id) continue;
+        const hs = findHotspot(gate, conn.pin)!;
+        const geom = this.geomOf(wire);
+        const ok = movePin(
+          geom,
+          conn,
+          { x: oldX + hs.x, y: oldY + hs.y },
+          { x: gate.x + hs.x, y: gate.y + hs.y },
+          (c) => this.pinPos(c),
+        );
+        if (!ok) wire.geom = null; // inconsistent geometry: fall back to re-route
+      }
+    }
   }
 
   // ---- hit testing ----
@@ -234,10 +295,12 @@ export class Editor {
     return null;
   }
 
-  private wireAt(p: Point): Wire | null {
+  private wireAt(p: Point): { wire: Wire; segId: number; vertical: boolean } | null {
     for (const wire of this.wires) {
-      for (const seg of routeWire(this.wirePoints(wire))) {
-        if (pointSegmentDistance(p, seg) <= WIRE_HIT_RADIUS) return wire;
+      for (const seg of this.geomOf(wire).segs) {
+        if (segDistance(p, seg) <= WIRE_HIT_RADIUS) {
+          return { wire, segId: seg.id, vertical: seg.vertical };
+        }
       }
     }
     return null;
@@ -321,9 +384,17 @@ export class Editor {
       return;
     }
 
-    const wire = this.wireAt(p);
-    if (wire) {
-      this.selection = { kind: 'wire', id: wire.id };
+    const hit = this.wireAt(p);
+    if (hit) {
+      this.selection = { kind: 'wire', id: hit.wire.id };
+      this.mode = {
+        kind: 'dragSeg',
+        wireId: hit.wire.id,
+        segId: hit.segId,
+        vertical: hit.vertical,
+        moved: false,
+        preMove: this.snapshot(),
+      };
       return;
     }
 
@@ -350,14 +421,34 @@ export class Editor {
         const nx = snap(p.x - mode.grabDx);
         const ny = snap(p.y - mode.grabDy);
         if (nx !== gate.x || ny !== gate.y) {
+          const ox = gate.x;
+          const oy = gate.y;
           gate.x = nx;
           gate.y = ny;
           mode.moved = true;
+          this.glueWires(gate, ox, oy);
         }
       }
     }
 
+    if (this.mode.kind === 'dragSeg') {
+      const mode = this.mode;
+      const wire = this.wires.find((w) => w.id === mode.wireId);
+      const seg = wire?.geom?.segs.find((s) => s.id === mode.segId);
+      if (wire && seg) {
+        const newPos = snap(mode.vertical ? p.x : p.y);
+        if (newPos !== seg.pos) {
+          dragSegTo(wire.geom!, seg.id, newPos, (c) => this.pinPos(c));
+          mode.moved = true;
+        }
+      } else {
+        this.mode = { kind: 'idle' }; // segment merged away mid-drag
+      }
+    }
+
     this.hoverHotspot = this.mode.kind === 'idle' || this.mode.kind === 'wiring' ? this.hotspotAt(p) : null;
+    this.hoverSeg =
+      this.mode.kind === 'idle' && !this.hoverHotspot && !this.gateAt(p) ? this.wireAt(p) : null;
     this.updateCursor();
   }
 
@@ -409,6 +500,12 @@ export class Editor {
       return;
     }
 
+    if (this.mode.kind === 'dragSeg') {
+      if (this.mode.moved) this.checkpoint(this.mode.preMove);
+      this.mode = { kind: 'idle' };
+      return;
+    }
+
     if (this.mode.kind === 'pan') this.mode = { kind: 'idle' };
   }
 
@@ -454,10 +551,12 @@ export class Editor {
   }
 
   private updateCursor(): void {
+    const seg = this.mode.kind === 'dragSeg' ? this.mode : this.hoverSeg;
     const cursor =
       this.mode.kind === 'pan' ? 'grabbing'
       : this.mode.kind === 'placing' ? 'copy'
       : this.mode.kind === 'wiring' || this.hoverHotspot ? 'crosshair'
+      : seg ? (seg.vertical ? 'ew-resize' : 'ns-resize')
       : 'default';
     this.canvas.style.cursor = cursor;
   }
@@ -537,7 +636,7 @@ export class Editor {
 
   private drawWire(wire: Wire): void {
     const { ctx } = this;
-    const points = this.wirePoints(wire);
+    const geom = this.geomOf(wire);
     const color = stateColor(this.circuit.netState(wire.id));
     const selected = this.selection?.kind === 'wire' && this.selection.id === wire.id;
 
@@ -545,15 +644,21 @@ export class Editor {
     ctx.lineWidth = (selected ? 3 : 2) / this.view.scale;
     ctx.setLineDash(selected ? [0.25, 0.25] : []);
     ctx.beginPath();
-    for (const s of routeWire(points)) {
-      ctx.moveTo(s.x1, s.y1);
-      ctx.lineTo(s.x2, s.y2);
+    for (const seg of geom.segs) {
+      const [a, b] = segEnds(seg);
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
     }
     ctx.stroke();
     ctx.setLineDash([]);
 
     ctx.fillStyle = color;
-    for (const p of points) {
+    for (const p of junctionPoints(geom)) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 0.16, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    for (const p of this.wirePoints(wire)) {
       ctx.beginPath();
       ctx.arc(p.x, p.y, 0.12, 0, Math.PI * 2);
       ctx.fill();
